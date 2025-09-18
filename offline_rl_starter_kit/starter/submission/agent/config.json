@@ -1,0 +1,12 @@
+{
+  "obs_dim": 5,
+  "act_dim": 3,
+  "hidden": [
+    128,
+    128
+  ],
+  "use_gru": true,
+  "stack": 1,
+  "include_prev_actions": false,
+  "maxlen": 10
+}

@@ -1,0 +1,18 @@
+{
+  "obs": [
+    "obs_1",
+    "obs_2",
+    "obs_3",
+    "obs_4",
+    "obs_5"
+  ],
+  "action": [
+    "action_1",
+    "action_2",
+    "action_3"
+  ],
+  "next_obs": [],
+  "reward": "reward",
+  "done": null,
+  "index": "index"
+}
