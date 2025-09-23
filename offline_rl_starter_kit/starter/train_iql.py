@@ -16,7 +16,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.mlp import MLP, Actor, Critic
+from models.mlp import  Actor, Critic
 from utils.normalization import Scaler
 
 def set_seed(seed=42):
@@ -167,7 +167,7 @@ if __name__ == "__main__":
     ap.add_argument("--out", type=str, default="/mnt/data/offline_rl_starter_kit")
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--updates", type=int, default=50_000)
+    ap.add_argument("--updates", type=int, default=20_000)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--hid", type=int, default=128)
     ap.add_argument("--lr_actor", type=float, default=1e-4)

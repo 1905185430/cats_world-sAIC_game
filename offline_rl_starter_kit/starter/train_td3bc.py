@@ -9,6 +9,9 @@ TD3+BC minimal trainer (from scratch, PyTorch).
 Usage:
   python starter/train_td3bc.py --data path/to/dataset.csv --out /mnt/data/offline_rl_starter_kit
 """
+#python3 offline_rl_starter_kit/starter/train_td3bc.py --data /home/xuan/cats_world-sAIC_game/offline_rl_starter_kit/data.csv --out /home/xuan/cats_world-sAIC_game/offline_rl_starter_kit/
+
+#python3 offline_rl_starter_kit/starter/train_td3bc.py --data /home/xuan/cats_world-sAIC_game/offline_rl_starter_kit/data.csv --out /home/xuan/cats_world-sAIC_game/offline_rl_starter_kit/ --updates 20000
 from __future__ import annotations
 import os, json, argparse
 from pathlib import Path
@@ -81,10 +84,11 @@ def train(args):
     next_obs_n = scaler.transform(next_obs) if next_obs is not None else None
 
     # Networks
-    actor = Actor(obs_dim, act_dim, hidden=(args.hid, args.hid)).to(device)
-    actor_t = Actor(obs_dim, act_dim, hidden=(args.hid, args.hid)).to(device)
-    critic = Critic(obs_dim, act_dim, hidden=(args.hid, args.hid)).to(device)
-    critic_t = Critic(obs_dim, act_dim, hidden=(args.hid, args.hid)).to(device)
+    hidden = tuple(args.hidden) if hasattr(args, 'hidden') else (args.hid, args.hid)
+    actor = Actor(obs_dim, act_dim, hidden=hidden).to(device)
+    actor_t = Actor(obs_dim, act_dim, hidden=hidden).to(device)
+    critic = Critic(obs_dim, act_dim, hidden=hidden).to(device)
+    critic_t = Critic(obs_dim, act_dim, hidden=hidden).to(device)
     
     # Better weight initialization for critics
     critic.apply(init_weights)
@@ -138,6 +142,7 @@ def train(args):
 
         # critic update
         q1, q2 = critic(s, a)
+        
         critic_loss = F.mse_loss(q1, y) + F.mse_loss(q2, y)
         
         # Early stopping if loss is exploding
@@ -159,12 +164,8 @@ def train(args):
         if step % policy_delay == 0:
             a_pi = actor(s)
             q1_pi, _ = critic(s, a_pi)
-            # More stable BC coefficient calculation
-            with torch.no_grad():
-                q_scale = torch.clamp(q1_pi.abs().mean(), min=0.1, max=10.0)
-                lam = bc_coef / q_scale.item()
-                lam = np.clip(lam, 0.1, 10.0)  # Bound lambda
-            policy_loss = lam * F.mse_loss(a_pi, a) - q1_pi.mean()
+            # 只用强化学习目标，不加行为克隆项
+            policy_loss = -q1_pi.mean()
 
             opt_actor.zero_grad(set_to_none=True)
             policy_loss.backward()
@@ -190,9 +191,9 @@ def train(args):
     cfg = {
         "obs_dim": int(obs_dim),
         "act_dim": int(act_dim),
-        "hidden": [args.hid, args.hid],
+        "hidden": list(hidden),
         "use_gru": False,
-        "stack": 1,
+        "stack": 3,
         "include_prev_actions": False,
         "maxlen": 10
     }
@@ -209,6 +210,7 @@ if __name__ == "__main__":
     ap.add_argument("--updates", type=int, default=50_000)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--hid", type=int, default=128)
+    ap.add_argument("--hidden", type=int, nargs='+', help="hidden layer sizes, e.g. --hidden 256 256 128")
     ap.add_argument("--lr_actor", type=float, default=5e-5)
     ap.add_argument("--lr_critic", type=float, default=5e-5)
     ap.add_argument("--gamma", type=float, default=0.99)
