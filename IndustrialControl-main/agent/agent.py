@@ -57,20 +57,6 @@ def _to_tensor(x, device):
         x = torch.from_numpy(x)
     return x.to(device=device, dtype=torch.float32)
 
-class MLPPolicy(nn.Module):
-    def __init__(self, in_dim: int, act_dim: int, hidden=(128, 128)):
-        super().__init__()
-        layers = []
-        last = in_dim
-        for h in hidden:
-            layers += [nn.Linear(last, h), nn.ReLU()]
-            last = h
-        layers += [nn.Linear(last, act_dim)]
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.tanh(self.net(x))
-
 class GRUPolicy(nn.Module):
     def __init__(self, in_dim: int, act_dim: int, hidden=128, num_layers=1):
         super().__init__()
@@ -94,15 +80,13 @@ class PolicyAgent(BaseAgent):
             "act_dim": None,
             "hidden": [128, 128],
             "use_gru": False,
-            # GRU 模式使用 seq_len（时间维窗口）；MLP 模式使用 stack（按特征拼接）
+            # GRU 模式使用 seq_len（时间维窗口）
             "seq_len": 10,
             "stack": 1,               # how many past obs to stack (MLP only)
-            "include_prev_actions": False,
             "maxlen": 10,             # internal buffer length (will be reset by load)
         }
         self.scaler_mean = None
         self.scaler_std = None
-        self.model_mlp: Optional[MLPPolicy] = None
         self.model_gru: Optional[GRUPolicy] = None
         self.h: Optional[torch.Tensor] = None
         self.obs_buffer: Deque[np.ndarray] = deque(maxlen=self.cfg["maxlen"])
@@ -129,7 +113,6 @@ class PolicyAgent(BaseAgent):
 
         - 从 obs_buffer 取最近 seq_len 帧，不足左侧填充
         - 对每步做标准化
-        - 若 include_prev_actions=True（默认False，且训练未用），此处可拼接，但会与训练不一致，故默认忽略
         """
         T = int(self.cfg.get("seq_len", 1))
         obs_dim = int(self.cfg.get("obs_dim") or 5)
@@ -143,18 +126,7 @@ class PolicyAgent(BaseAgent):
 
         obs_arr = np.stack(obs_list, axis=0).astype(np.float32)  # [T, obs_dim]
         obs_arr = self._standardize(obs_arr)
-
-        if bool(self.cfg.get("include_prev_actions", False)):
-            # 警告：训练的GRU Actor 输入是 obs_dim，不包含动作；若在此拼接将导致权重不匹配。
-            act_list = list(self.act_buffer)[-T:]
-            if len(act_list) == 0:
-                act_list = [np.zeros((act_dim,), dtype=np.float32)]
-            while len(act_list) < T:
-                act_list.insert(0, act_list[0])
-            act_arr = np.stack(act_list, axis=0).astype(np.float32)  # [T, act_dim]
-            x = np.concatenate([obs_arr, act_arr], axis=-1)
-        else:
-            x = obs_arr
+        x = obs_arr
         return x
 
     def _build_inputs(self, obs_now: np.ndarray) -> np.ndarray:
@@ -215,36 +187,19 @@ class PolicyAgent(BaseAgent):
         # infer model inputs
         obs_dim = int(self.cfg["obs_dim"] or 5)
         act_dim = int(self.cfg["act_dim"] or 3)
-        if bool(self.cfg.get("use_gru", False)):
-            # 训练的GRU Actor 输入为 obs_dim（不拼接动作）
-            in_dim_gru = obs_dim
-            self.model_gru = GRUPolicy(in_dim=in_dim_gru, act_dim=act_dim, hidden=int(self.cfg["hidden"][0]))
-            self.model_gru.to(self.device).eval()
-        else:
-            # MLP 按特征拼接
-            stack = int(self.cfg.get("stack", 1))
-            in_dim_mlp = obs_dim * stack
-            if self.cfg.get("include_prev_actions", False):
-                in_dim_mlp += act_dim * stack
-            self.model_mlp = MLPPolicy(in_dim=in_dim_mlp, act_dim=act_dim, hidden=tuple(self.cfg["hidden"]))
-            self.model_mlp.to(self.device).eval()
+        
+        # 训练的GRU Actor 输入为 obs_dim（不拼接动作）
+        in_dim_gru = obs_dim
+        self.model_gru = GRUPolicy(in_dim=in_dim_gru, act_dim=act_dim, hidden=int(self.cfg["hidden"][0]))
+        self.model_gru.to(self.device).eval()
+        
 
         # load weights if present
         if model_path.exists():
             try:
                 state = torch.load(model_path, map_location=self.device)
                 if isinstance(state, dict):
-                    if self.model_mlp is not None and "mlp" in state:
-                        self.model_mlp.load_state_dict(state["mlp"])
-                    elif self.model_gru is not None and "gru" in state:
-                        self.model_gru.load_state_dict(state["gru"])
-                    else:
-                        target = self.model_gru if self.model_gru is not None else self.model_mlp
-                        if target is not None:
-                            target.load_state_dict(state)
-                        else:
-                            self._loaded = False
-                            return
+                    self.model_gru.load_state_dict(state["gru"])
                     self._loaded = True
                 else:
                     self._loaded = False
@@ -265,20 +220,16 @@ class PolicyAgent(BaseAgent):
         assert single, "PolicyAgent 只支持单步输入推理（内部维护时序）"
         obs = obs.astype(np.float32)
 
-        if self.model_gru is not None:
-            # 维护时序缓冲
-            self.obs_buffer.append(obs)
-            # 构造 [1, T, in_dim]
-            seq = self._build_sequence()[None, ...]
-            xt = _to_tensor(seq, self.device)
-            a, self.h = self.model_gru(xt, self.h)  # 取最后一帧动作
-            act = a.cpu().numpy()
-        else:
-            # 兼容旧的 MLP + stack 模式
-            x = self._build_inputs(obs)
-            xt = _to_tensor(x[None, ...], self.device)  # [1, in_dim]
-            assert self.model_mlp is not None, "MLP 模型未加载"
-            act = self.model_mlp(xt).cpu().numpy()
+        
+        # 维护时序缓冲
+        self.obs_buffer.append(obs)
+        # 构造 [1, T, in_dim]
+        seq = self._build_sequence()[None, ...]
+        xt = _to_tensor(seq, self.device)
+        if self.model_gru is None:
+            raise RuntimeError("GRU model is not loaded. Please check if the model.pth exists and is valid.")
+        a, self.h = self.model_gru(xt, self.h)  # 取最后一帧动作
+        act = a.cpu().numpy()
 
         act = np.clip(act, -1.0, 1.0)
         self.act_buffer.append(act[0].astype(np.float32))
